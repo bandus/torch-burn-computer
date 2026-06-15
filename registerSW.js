@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/torch-burn-computer/sw.js', { scope: '/torch-burn-computer/' })})}
