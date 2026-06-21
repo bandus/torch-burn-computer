@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Local research files
+DLL_RESULTS.MD
+MATH_AUDIT_REPORT.md
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
