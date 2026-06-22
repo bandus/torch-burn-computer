@@ -54,5 +54,6 @@ export default defineConfig({
   base: '/torch-burn-computer/',
   test: {
     environment: 'node',
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**'],
   },
 });

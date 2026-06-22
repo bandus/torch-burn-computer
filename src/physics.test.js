@@ -17,13 +17,14 @@ import {
   computePlan,
   computeFinalApproach,
   solveAcceleration,
+  buildDriftPlan,
 } from './physics.js';
 
 // ───── constants ──────────────────────────────────────────────────────────
 
 describe('constants', () => {
   it('G is standard gravity', () => expect(G).toBe(9.80665));
-  it('DAY is 87659 seconds', () => expect(DAY).toBe(87659));
+  it('DAY is 87658.125 seconds', () => expect(DAY).toBe(87658.125));
   it('NO_WAKE_M is 300 km', () => expect(NO_WAKE_M).toBe(300_000));
 });
 
@@ -80,7 +81,9 @@ describe('parseGameTime', () => {
   it('rejects time ≥ DAY', () => expect(parseGameTime('24:21:00')).toBeNull());
   it('rejects invalid month 13', () => expect(parseGameTime('2025-13-01 00:00:00')).toBeNull());
   it('rejects invalid day 0', () => expect(parseGameTime('2025-01-00 00:00:00')).toBeNull());
-  it('rejects Feb 30', () => expect(parseGameTime('2025-02-30 00:00:00')).toBeNull());
+  it('accepts Feb 30 (fixed 30-day months)', () =>
+    expect(parseGameTime('2025-02-30 00:00:00')).not.toBeNull());
+  it('rejects day 31', () => expect(parseGameTime('2025-02-31 00:00:00')).toBeNull());
   it('accepts 00:00:00', () => {
     expect(parseGameTime('00:00:00')).toEqual({ date: null, seconds: 0 });
   });
@@ -109,10 +112,10 @@ describe('parseTargetDuration', () => {
     expect(parseTargetDuration('1d')).toBe(DAY);
   });
   it('parses fractional days', () =>
-    expect(parseTargetDuration('4.5d')).toBe(4.5 * DAY));
+    expect(parseTargetDuration('4.5d')).toBe(Math.round(4.5 * DAY * 1000) / 1000));
   it('parses fractional minutes', () => expect(parseTargetDuration('3.5m')).toBe(210));
   it('parses fractional days combined with other units', () =>
-    expect(parseTargetDuration('1.5d 2h')).toBe(1.5 * DAY + 2 * 3600));
+    expect(parseTargetDuration('1.5d 2h')).toBe(Math.round((1.5 * DAY + 2 * 3600) * 1000) / 1000));
   it('rejects empty', () => expect(parseTargetDuration('')).toBeNull());
   it('rejects zero', () => expect(parseTargetDuration('0')).toBeNull());
   it('rejects trailing garbage digits after a unit token', () =>
@@ -161,6 +164,10 @@ describe('formatTargetDuration', () => {
     // 1 day + 40 minutes
     expect(formatTargetDuration(DAY + 40 * 60)).toBe('1D 40M');
   });
+  it('formats a multi-day duration with a trailing partial second', () => {
+    // 2 days + 3 hours + 47.6 s → minutes component is zero (suppressed)
+    expect(formatTargetDuration(2 * DAY + 3 * 3600 + 47.6)).toBe('2D 3H 47S');
+  });
   it('returns null for 0', () => expect(formatTargetDuration(0)).toBeNull());
   it('returns null for negative', () => expect(formatTargetDuration(-1)).toBeNull());
 });
@@ -168,9 +175,9 @@ describe('formatTargetDuration', () => {
 // ───── daysInMonth ────────────────────────────────────────────────────────
 
 describe('daysInMonth', () => {
-  it('January has 31 days', () => expect(daysInMonth(1, 2025)).toBe(31));
-  it('February 2024 (leap) has 29 days', () => expect(daysInMonth(2, 2024)).toBe(29));
-  it('February 2025 (non-leap) has 28 days', () => expect(daysInMonth(2, 2025)).toBe(28));
+  it('January has 30 days (fixed-length game month)', () => expect(daysInMonth(1, 2025)).toBe(30));
+  it('February has 30 days (no leap years)', () => expect(daysInMonth(2, 2024)).toBe(30));
+  it('February non-leap has 30 days', () => expect(daysInMonth(2, 2025)).toBe(30));
   it('April has 30 days', () => expect(daysInMonth(4, 2025)).toBe(30));
 });
 
@@ -210,6 +217,13 @@ describe('addGameTime', () => {
     expect(result.dateStr).toBe('2025-01-01');
   });
 
+  it('accumulates across multiple 30-day months', () => {
+    // Jan 15 + 95 days, fixed 30-day months: day-of-year 15 + 95 = 110 → month 4, day 20
+    const base = { date: { y: 2025, mo: 1, d: 15 }, seconds: 0 };
+    const result = addGameTime(base, 95 * DAY);
+    expect(result.dateStr).toBe('2025-04-20');
+  });
+
   it('returns null for null base', () => {
     expect(addGameTime(null, 100)).toBeNull();
   });
@@ -217,7 +231,7 @@ describe('addGameTime', () => {
   it('wraps a time-only offset past the day boundary and reports day offset', () => {
     const base = { date: null, seconds: 87132 }; // 24:12:12
     const result = addGameTime(base, 123581); // ~34h19m41s later
-    expect(result.timeStr).toBe('09:49:55');
+    expect(result.timeStr).toBe('09:49:56');
     expect(result.hasDate).toBe(false);
     expect(result.dayOffset).toBe(2);
   });
@@ -301,18 +315,42 @@ describe('computePlan', () => {
     expect(result.shortfall).toBeGreaterThan(0);
   });
 
-  it('returns flip_now when already past optimal flip point', () => {
-    // Very high v0 relative to distance — accel phase shrinks to zero
+  it('returns flip_now when already at the optimal flip point', () => {
+    // At distance == brake-only distance, v_max == v0 exactly, so no accel phase
+    // is needed and the burn must flip immediately.
+    const v0 = 1000;
+    const a = 2 * G;
+    const t_rot = 60;
+    const brakeOnly = v0 * t_rot + (v0 * v0) / (2 * a);
     const result = computePlan({
-      distance_m: 500_000,
-      v0_mps: 1000,
+      distance_m: brakeOnly,
+      v0_mps: v0,
+      a_mps2: a,
+      v_arrival_mps: 0,
+      t_rotate_s: t_rot,
+    });
+    expect(result.flip_now).toBe(true);
+    expect(result.t_accel).toBe(0);
+    expect(result.t_brake).toBeGreaterThan(0);
+  });
+
+  it('handles a receding (negative v0) burn', () => {
+    const params = {
+      distance_m: 2_000_000,
+      v0_mps: -300,
       a_mps2: 2 * G,
       v_arrival_mps: 0,
       t_rotate_s: 60,
-    });
-    // Either flip_now or normal success — just not error/overshoot
+    };
+    const result = computePlan(params);
     expect(result.error).toBeUndefined();
     expect(result.overshoot).toBeUndefined();
+    expect(result.v_max).toBeGreaterThan(0);
+    // Distance conservation (d_coast is the flip-coast distance)
+    expect(result.d_accel + result.d_coast + result.d_brake).toBeCloseTo(params.distance_m, 0);
+    // Receding penalty: accel phase is longer than the equivalent closing burn
+    const closing = computePlan({ ...params, v0_mps: 300 });
+    expect(result.t_accel).toBeGreaterThan(closing.t_accel);
   });
 });
 
@@ -414,5 +452,42 @@ describe('solveAcceleration', () => {
     });
     expect(result.error).toBeUndefined();
     expect(result.a_mps2).toBeGreaterThan(0);
+  });
+});
+
+// ───── buildDriftPlan ─────────────────────────────────────────────────────
+
+describe('buildDriftPlan', () => {
+  const base = {
+    distance_m: 2_000_000,
+    v0_mps: 500,
+    a_mps2: 2 * G,
+    v_arrival_mps: 0,
+    t_rotate_s: 60,
+  };
+
+  it('returns a valid drift plan whose phase distances sum to distance_m', () => {
+    const result = buildDriftPlan({ ...base, v_max: 2000 });
+    expect(result).not.toBeNull();
+    expect(result.t_drift).toBeGreaterThan(0);
+    const d_flip = result.v_max * result.t_rotate;
+    expect(result.d_accel + d_flip + result.d_drift + result.d_brake).toBeCloseTo(
+      base.distance_m,
+      0
+    );
+  });
+
+  it('returns null when v_max leaves no room for a drift phase', () => {
+    const result = buildDriftPlan({ ...base, distance_m: 100_000, v_max: 10_000 });
+    expect(result).toBeNull();
+  });
+
+  it('clamps drift to zero at the standard (no-drift) peak velocity', () => {
+    // The computePlan peak velocity exactly fills accel+flip+brake, leaving zero drift.
+    const std = computePlan(base);
+    const result = buildDriftPlan({ ...base, v_max: std.v_max });
+    expect(result).not.toBeNull();
+    expect(result.t_drift).toBeCloseTo(0, 5);
+    expect(result.d_drift).toBeCloseTo(0, 0);
   });
 });

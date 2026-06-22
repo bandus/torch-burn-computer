@@ -37,14 +37,19 @@ Robert has caught Claude fabricating Ostranauts-specific mechanics before. Do no
 
 ```
 G              = 9.80665 m/s²     (standard gravity)
-AU             = 149,597,870,700 m
+AU             = 149,597,870,000 m  (DLL-confirmed Ostranauts value)
 GM             = 1×10⁹ m          (game meter unit)
 NO_WAKE_M      = 300,000 m        (300 km no-wake zone)
-DAY            = 87,659 s         (Ostranauts game day: 24h + "untime" 24:00:00→24:20:58)
-EFFICIENCY_TIME_MULTIPLIER = 2
+DAY            = 87,658.125 s     (Ostranauts game day — DLL-confirmed true length)
 ```
 
-**Why DAY = 87,659 s:** The Ostranauts game clock runs a standard 24-hour day plus an "untime" period. The last displayed second before rollover is 24:20:58 = 87,658 s, making the rollover point 87,659 s. This is NOT a standard 86,400 s day.
+**Why DAY = 87,658.125 s:** Confirmed from `Assembly-CSharp.dll` (`MathUtils.GetDayOfYearFromS` divides by `87658.125`). The clock runs a 24-hour day plus an "untime" period; the last *displayed* whole second is 24:20:58, but the true day length is 87,658.125 s (a month is exactly 30 of these = 2,629,743.75 s; a year is 12 months, no leap years). This is NOT a standard 86,400 s day.
+
+Because `DAY` is fractional, `addGameTime` does **not** floor its offset (a one-day offset would otherwise drop below `DAY` and skip rollover), and `formatTargetDuration` derives days from the raw value before flooring h/m/s. The 0.875 s/day difference affects clock/calendar *display* only — never burn physics.
+
+**Calendar:** Every month is exactly **30 game-days**, no leap years (`daysInMonth` returns a constant `30`). Day 30 is valid; day 31 is rejected.
+
+**`EFFICIENCY_TIME_MULTIPLIER` was removed** — it was exported but never used.
 
 ---
 
@@ -55,8 +60,9 @@ EFFICIENCY_TIME_MULTIPLIER = 2
 - **Signed v0 convention:** closing velocity = positive, receding = negative.
 - **parseGameTime** accepts full datetime `YYYY-MM-DD HH:MM:SS` or strict time-only `HH:MM:SS` (regex: `/^(\d{1,2}):(\d{2}):(\d{2})$/`). Bare `HH:MM` is intentionally rejected.
 - **parseTargetDuration** (duration fields: Flip Time, Reactant Budget, Desired Travel Time) is intentionally permissive — accepts `4d 3h 2m 37s`, `HH:MM:SS`, bare seconds, etc.
-- **VREL and VCRS are independent axes** in-game (confirmed by in-game test). No vector combination needed.
-- **High VCRS warning threshold:** `Math.abs(vcrs_mps) > 500` (flat absolute, not ratio-based).
+- **VCRS is a component of VREL, not an orthogonal axis** (DLL-confirmed: in `NavModTargetData.SetStringsVRelShip`, VREL is the full 2D relative-velocity magnitude and VCRS is its cross-track component). Burn distance is the straight-line range only — **no Pythagorean inflation**. The workflow is: null VCRS first, then run the range burn.
+- **High VCRS warning** is severity-based, not a flat threshold. `vcrsSeverity = vcrsNullTime / plan.t_total` where `vcrsNullTime = |vcrs| / a`. This folds in closure rate, range, and thrust (all baked into `t_total`). Two tiers: **advisory** at `> 0.10` (amber — nulling eats >10% of the approach), **critical** at `> 0.50` (red — cannot null in time; reduce closure or abort).
+- **Manual null heading:** positive VCRS → `90.00°` (forward thrust decreases VCRS), negative → `270.00°` (forward thrust increases it toward zero). Confirmed in-game.
 
 ### Implicit Solve Direction (Burn Plan mode)
 - Acceleration blank, Travel Time filled → solve for acceleration

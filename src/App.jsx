@@ -4,7 +4,6 @@ import './styles.css';
 import {
   G,
   AU,
-  DAY,
   NO_WAKE_M,
   parseNum,
   parseGValue,
@@ -12,7 +11,6 @@ import {
   formatDistance,
   formatVelocity,
   parseGameTime,
-  daysInMonth,
   addGameTime,
   formatGameTime,
   computePlan,
@@ -23,7 +21,7 @@ import {
   buildDriftPlan,
 } from './physics.js';
 
-const APP_VERSION = 'v0.7.0';
+const APP_VERSION = 'v0.7.1';
 
 // Embedded screenshot data for tooltips
 const TOOLTIP_IMG_DISTANCE = `${import.meta.env.BASE_URL}tooltips/distance.jpg`;
@@ -53,7 +51,7 @@ function _lsSave(key, value) {
   try {
     if (value !== null && value !== undefined) localStorage.setItem(key, String(value));
     else localStorage.removeItem(key);
-  } catch {}
+  } catch { /* storage unavailable — ignore */ }
 }
 /** Read from URL, then localStorage, then fall back to default. */
 function _ul(urlKey, lsKey, fallback) {
@@ -220,7 +218,7 @@ function BurnCalculatorInner() {
   const [vArrival, setVArrival] = useState(() => _up('va') ?? '0');
   const [vArrivalUnit, setVArrivalUnit] = useState(() => _ul('vau', 'pa_vau', 'm/s'));
   const [vcrs, setVcrs] = useState(() => _up('cx') ?? '');
-  const [vcrsUnit, setVcrsUnit] = useState(() => _up('cu') ?? 'm/s');
+  const [vcrsUnit, setVcrsUnit] = useState(() => _ul('cu', 'pa_cu', 'm/s'));
   const [noWakeEnabled, setNoWakeEnabled] = useState(() => {
     const u = _up('nw');
     if (u !== null) return u !== '0';
@@ -271,7 +269,7 @@ function BurnCalculatorInner() {
         '',
         `${window.location.pathname}${qs ? '?' + qs : ''}#${appMode}`
       );
-    } catch {}
+    } catch { /* history API restricted — ignore */ }
   }, [
     distance, distanceUnit, v0, v0Unit, v0Direction, accel, flipTime, reactantBudget,
     vArrival, vArrivalUnit, vcrs, vcrsUnit, noWakeEnabled, standoffKm, targetDuration,
@@ -290,12 +288,13 @@ function BurnCalculatorInner() {
     _lsSave('pa_du', distanceUnit !== 'km' ? distanceUnit : null);
     _lsSave('pa_vu', v0Unit !== 'm/s' ? v0Unit : null);
     _lsSave('pa_vau', vArrivalUnit !== 'm/s' ? vArrivalUnit : null);
+    _lsSave('pa_cu', vcrsUnit !== 'm/s' ? vcrsUnit : null);
     _lsSave('pa_fadu', faDistanceUnit !== 'km' ? faDistanceUnit : null);
     _lsSave('pa_favu', faVrelUnit !== 'm/s' ? faVrelUnit : null);
     _lsSave('pa_fvau', faVArrivalUnit !== 'm/s' ? faVArrivalUnit : null);
   }, [
     accel, faAccel, flipTime, burnPreference, noWakeEnabled, standoffKm,
-    distanceUnit, v0Unit, vArrivalUnit, faDistanceUnit, faVrelUnit, faVArrivalUnit,
+    distanceUnit, v0Unit, vArrivalUnit, vcrsUnit, faDistanceUnit, faVrelUnit, faVArrivalUnit,
   ]);
 
   // ── mode switch — copies shared fields (range, vrel) on transition ────────
@@ -443,8 +442,8 @@ function BurnCalculatorInner() {
     noWakeEnabled || (isFinite(parseNum(standoffKm)) && parseNum(standoffKm) > 0);
   const distance_m =
     parseNum(distance) *
-    (distanceUnit === 'au' ? AU : distanceUnit === 'gm' ? 1e9 : distanceUnit === 'km' ? 1000 : 1);
-  const raw_burn_distance_m = distance_m - standoff_m; // before VCRS correction
+    (distanceUnit === 'au' ? AU : distanceUnit === 'gm' ? 1e9 : 1000);
+  const raw_burn_distance_m = distance_m - standoff_m; // burn distance after stand-off
   const v0_mps =
     parseNum(v0) * (v0Unit === 'km/s' ? 1000 : 1) * (v0Direction === 'receding' ? -1 : 1);
   const t_rotate_s_parsed = parseTargetDuration(flipTime);
@@ -503,8 +502,10 @@ function BurnCalculatorInner() {
     a_mps2 = isFinite(v) && v < 0.01 * G ? NaN : v;
   }
 
-  // VCRS geometry correction (one-iteration approach):
-  // Pass 1 — solve with straight-line burn distance to get approximate t_total
+  // VREL already contains the cross-track component (VCRS is a component of it,
+  // not an orthogonal axis), so burn distance is the straight-line range only —
+  // no VCRS inflation. Players null VCRS first; see the cross-track advisory below.
+  const burn_distance_m = raw_burn_distance_m;
   const standoffBlockMsg =
     standoffError === 'invalid-standoff'
       ? 'INVALID STAND-OFF DISTANCE'
@@ -512,25 +513,9 @@ function BurnCalculatorInner() {
         ? 'DISTANCE WITHIN NO-WAKE ZONE'
         : `DISTANCE WITHIN STAND-OFF ZONE (${standoffKm} KM)`;
 
-  const plan1 = noWakeError
-    ? { error: standoffBlockMsg }
-    : computePlan({ distance_m: raw_burn_distance_m, v0_mps, a_mps2, v_arrival_mps, t_rotate_s });
-
-  // Compute cross-track drift over the burn duration, correct the true distance
-  const t_total_approx = plan1.t_total || 0;
-  const cross_drift_m = Math.abs(vcrs_mps) * t_total_approx;
-  const burn_distance_m =
-    vcrs_mps !== 0 && t_total_approx > 0
-      ? Math.sqrt(raw_burn_distance_m ** 2 + cross_drift_m ** 2)
-      : raw_burn_distance_m;
-  const vcrs_correction_m = burn_distance_m - raw_burn_distance_m;
-
-  // Pass 2 — recompute with corrected distance
   const plan = noWakeError
     ? { error: standoffBlockMsg }
-    : vcrs_mps !== 0 && t_total_approx > 0
-      ? computePlan({ distance_m: burn_distance_m, v0_mps, a_mps2, v_arrival_mps, t_rotate_s })
-      : plan1;
+    : computePlan({ distance_m: burn_distance_m, v0_mps, a_mps2, v_arrival_mps, t_rotate_s });
 
   // ════════════════════════════════════════════════════════════════════
   // BUDGET / DRIFT SOLVER
@@ -582,17 +567,25 @@ function BurnCalculatorInner() {
   // finalPlan is activePlan (drift mode if budget set, otherwise standard)
   const finalPlan = activePlan;
 
-  // VCRS advisory threshold — warn when cross-track drift extends burn distance by >5%
-  const highVcrsWarning = vcrs_correction_m >= burn_distance_m * 0.05;
-
-  // Manual null heading + null time for high VCRS warning
+  // Cross-track (VCRS) advisory. Severity = time to null the cross-track velocity
+  // divided by time to reach the target. This folds in closure rate, range, and
+  // thrust (all baked into plan.t_total) — high severity means you cannot null in
+  // time. Advisory at >10% of approach time, hard warning at >50%.
   const vcrsNullTime =
-    highVcrsWarning && isFinite(vcrs_mps) && isFinite(a_mps2) && a_mps2 > 0
+    isFinite(vcrs_mps) && vcrs_mps !== 0 && isFinite(a_mps2) && a_mps2 > 0
       ? Math.abs(vcrs_mps) / a_mps2
       : null;
 
+  const vcrsSeverity =
+    vcrsNullTime !== null && !plan.error && !plan.overshoot && plan.t_total > 0
+      ? vcrsNullTime / plan.t_total
+      : 0;
+
+  const vcrsAdvisory = vcrsSeverity > 0.1; // advisory tier (either tier renders)
+  const vcrsCritical = vcrsSeverity > 0.5; // hard-warning tier
+
   const manualNullBearing =
-    highVcrsWarning && isFinite(vcrs_mps) ? (vcrs_mps >= 0 ? '90.00°' : '270.00°') : null;
+    vcrsAdvisory && isFinite(vcrs_mps) ? (vcrs_mps >= 0 ? '90.00°' : '270.00°') : null;
 
   // ── Final Approach calculations ──
   const fa_distance_m_raw =
@@ -617,6 +610,14 @@ function BurnCalculatorInner() {
   // Reject computed acceleration below minimum viable thrust (0.01 G)
   const fa_required_a_belowMin =
     fa_required_a_computed !== null && fa_required_a_computed < 0.01 * G;
+  // Constant-burn mode with an unbrakeable cutoff: surface a specific message instead
+  // of the generic MISSING/INVALID that a NaN computed accel would otherwise trigger.
+  const fa_cutoffTooHigh =
+    faAccelBlank &&
+    isFinite(fa_v0_mps) &&
+    fa_v0_mps > 0 &&
+    isFinite(fa_v_arrival_mps) &&
+    fa_v_arrival_mps >= fa_v0_mps;
   // Operating acceleration: computed required_a when blank (and above floor), otherwise player input
   const fa_a_mps2 = faAccelBlank
     ? fa_required_a_computed !== null && !fa_required_a_belowMin
@@ -773,7 +774,6 @@ function BurnCalculatorInner() {
       : (!targetDurationAttempted || !targetDurationValid) && 'DESIRED TRAVEL TIME',
     flipTime.trim() === '' && 'FLIP TIME',
     vArrival.trim() !== '' && !isFinite(v_arrival_mps) && 'CUTOFF VELOCITY',
-    vcrs.trim() !== '' && !isFinite(vcrs_mps) && 'VCRS',
   ].filter(Boolean);
   const statusText = budgetInsufficient
     ? 'INVALID'
@@ -946,6 +946,14 @@ function BurnCalculatorInner() {
                       img: TOOLTIP_IMG_VCRS,
                     }}
                   />
+                  {vcrs.trim() !== '' && !isFinite(vcrs_mps) && (
+                    <div
+                      className="bc-field-note"
+                      style={{ color: 'var(--red)', marginBottom: 8, paddingLeft: 118 }}
+                    >
+                      INVALID — ENTER A NUMERIC VALUE OR LEAVE BLANK
+                    </div>
+                  )}
 
                   {/* ── Arrival Parameters ── */}
                   <div className="bc-panel-header" style={{ marginTop: 20 }}>
@@ -1380,13 +1388,29 @@ function BurnCalculatorInner() {
                     </div>
                   )}
 
-                  {highVcrsWarning && !plan.error && !plan.overshoot && (
+                  {vcrsAdvisory && !plan.error && !plan.overshoot && (
                     <>
-                      <div className="bc-advisory">
-                        <strong>HIGH VCRS DETECTED</strong> — Cross-track velocity is{' '}
-                        {formatVelocity(Math.abs(vcrs_mps))}. VCRS is significantly extending burn
-                        distance.
-                      </div>
+                      {vcrsCritical ? (
+                        <div className="bc-warning" role="alert">
+                          <AlertTriangle size={14} color="var(--red)" />
+                          <div className="bc-warning-text">
+                            <strong>CANNOT NULL CROSS-TRACK IN TIME</strong>
+                            <br />
+                            Cross-track velocity is {formatVelocity(Math.abs(vcrs_mps))}; nulling it
+                            requires {formatTime(Math.floor(vcrsNullTime))} (
+                            {(vcrsSeverity * 100).toFixed(0)}% of approach time). Reduce closure rate
+                            or abort the approach.
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bc-advisory">
+                          <strong>CROSS-TRACK VELOCITY</strong> — {formatVelocity(Math.abs(vcrs_mps))}{' '}
+                          of cross-track. Null it before burning: ~
+                          {formatTime(Math.floor(vcrsNullTime))} (
+                          {(vcrsSeverity * 100).toFixed(0)}% of approach). Burning straight toward the
+                          target will not correct it.
+                        </div>
+                      )}
                       {manualNullBearing && (
                         <Readout
                           label="Manual Null Heading"
@@ -1523,14 +1547,6 @@ function BurnCalculatorInner() {
                         flickerKey={flickerKey}
                       />
 
-                      {/* ── Divider ── */}
-                      {vcrs_correction_m >= burn_distance_m * 0.001 && (
-                        <div className="bc-info" style={{ marginTop: 10 }}>
-                          <strong>CROSS-TRACK CORRECTION APPLIED</strong> — burn distance extended
-                          by {formatDistance(vcrs_correction_m)} due to VCRS drift over burn
-                          duration.
-                        </div>
-                      )}
                     </>
                   )}
                 </div>
@@ -1573,9 +1589,11 @@ function BurnCalculatorInner() {
                     />
                     <Readout
                       label="Min Reactant Budget"
-                      value={formatTargetDuration(
-                        Math.floor((finalPlan.t_accel || 0) + (finalPlan.t_brake || 0))
-                      )}
+                      value={
+                        formatTargetDuration(
+                          Math.floor((finalPlan.t_accel || 0) + (finalPlan.t_brake || 0))
+                        ) ?? '0S'
+                      }
                       highlight
                       flickerKey={flickerKey}
                     />
@@ -1636,7 +1654,17 @@ function BurnCalculatorInner() {
                     </div>
                   )}
 
-                  {faPlan && faPlan.error && !faMissingFields.length && (
+                  {/* FA constant-burn cutoff ≥ closing velocity */}
+                  {fa_cutoffTooHigh && (
+                    <div className="bc-warning" role="alert">
+                      <AlertTriangle size={14} color="var(--red)" />
+                      <div className="bc-warning-text">
+                        <strong>CUTOFF VELOCITY MUST BE LESS THAN CLOSING VELOCITY</strong>
+                      </div>
+                    </div>
+                  )}
+
+                  {faPlan && faPlan.error && !faMissingFields.length && !fa_cutoffTooHigh && (
                     <div className="bc-warning" role="alert">
                       <AlertTriangle size={14} color="var(--red)" />
                       <div className="bc-warning-text">

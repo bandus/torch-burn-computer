@@ -1,11 +1,10 @@
 export const G = 9.80665; // standard gravity, m/s²
-export const AU = 149_597_870_700; // meters per astronomical unit
-// Game day: standard 24h clock + "untime" (24:00:00 → 24:20:58),
-// then rolls to 00:00:00. Last displayed second 24:20:58 = 87,658 s.
-// DAY = 87,659 is the exclusive rollover point; the last *valid* second is 87,658.
-export const DAY = 24 * 3600 + 20 * 60 + 59; // 87,659 s
+export const AU = 149_597_870_000; // meters per astronomical unit (Ostranauts value)
+// Game day: the true physical day length per the game DLL
+// (MathUtils.GetDayOfYearFromS uses 87,658.125 s = 24h 20m 58.125s).
+// The clock displays whole seconds, so the last displayed second is 24:20:58.
+export const DAY = 87_658.125; // s
 export const NO_WAKE_M = 300_000; // 300 km no-wake zone at destination
-export const EFFICIENCY_TIME_MULTIPLIER = 2; // efficiency trip ≤ N× the standard-burn time
 
 // ───── parsers ────────────────────────────────────────────────────────────
 
@@ -62,9 +61,13 @@ export function parseGameTime(timeStr) {
   return { date: null, seconds: secs };
 }
 
-/** @param {number} mo @param {number} y @returns {number} */
-export function daysInMonth(mo, y) {
-  return new Date(y, mo, 0).getDate();
+/**
+ * Ostranauts months are a fixed 30 game-days each — no leap years, no variable
+ * lengths (confirmed via Assembly-CSharp.dll: month = 2,629,743.75 s = 30 days).
+ * @returns {number}
+ */
+export function daysInMonth() {
+  return 30;
 }
 
 /**
@@ -82,16 +85,16 @@ export function parseTargetDuration(str) {
   let matched = false;
 
   // Extract day component if present: e.g. "4d" (decimals allowed, e.g. "3.5d")
-  const dayMatch = s.match(/([\d.]+)\s*d/);
+  const dayMatch = s.match(/(\d+(?:\.\d+)?)\s*d/);
   if (dayMatch) {
     total += parseFloat(dayMatch[1]) * DAY;
     matched = true;
   }
 
   // Extract h/m/s components if present: "3h", "2m", "37s" (decimals allowed, e.g. "39.09h")
-  const hourMatch = s.match(/([\d.]+)\s*h/);
-  const minMatch = s.match(/([\d.]+)\s*m(?!s)/); // 'm' not followed by 's' (avoid 'ms')
-  const secMatch = s.match(/([\d.]+)\s*s/);
+  const hourMatch = s.match(/(\d+(?:\.\d+)?)\s*h/);
+  const minMatch = s.match(/(\d+(?:\.\d+)?)\s*m(?!s)/); // 'm' not followed by 's' (avoid 'ms')
+  const secMatch = s.match(/(\d+(?:\.\d+)?)\s*s/);
   if (hourMatch) {
     total += parseFloat(hourMatch[1]) * 3600;
     matched = true;
@@ -191,7 +194,10 @@ export function formatVelocity(mps) {
  */
 export function addGameTime(base, offsetSeconds) {
   if (base == null || !isFinite(offsetSeconds)) return null;
-  let total = base.seconds + Math.floor(offsetSeconds);
+  // Keep the offset un-floored: DAY is fractional (87,658.125 s), so flooring a
+  // one-day offset would drop it below DAY and skip the rollover. Output h/m/s
+  // are floored below, so the displayed clock stays on whole seconds.
+  let total = base.seconds + offsetSeconds;
   let datePart = base.date ? { ...base.date } : null;
   // Day rollover always runs, even with no calendar date, so time-only inputs
   // wrap at the DAY boundary instead of accumulating past 24h indefinitely.
@@ -242,12 +248,14 @@ export function formatGameTime(parsed) {
  */
 export function formatTargetDuration(seconds) {
   if (!isFinite(seconds) || seconds <= 0) return null;
-  const total = Math.floor(seconds);
-  const days = Math.floor(total / DAY);
-  const rem = total % DAY;
+  // DAY is fractional (87,658.125 s), so compute days from the raw value and
+  // floor only the extracted components — pre-flooring the input against a
+  // fractional DAY would shave whole minutes off clean day-plus offsets.
+  const days = Math.floor(seconds / DAY);
+  const rem = seconds - days * DAY;
   const h = Math.floor(rem / 3600);
   const m = Math.floor((rem % 3600) / 60);
-  const sc = rem % 60;
+  const sc = Math.floor(rem % 60);
 
   const parts = [];
   if (days > 0) parts.push(`${days}D`);
