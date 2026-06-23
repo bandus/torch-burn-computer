@@ -21,7 +21,7 @@ import {
   buildDriftPlan,
 } from './physics.js';
 
-const APP_VERSION = 'v0.7.1';
+const APP_VERSION = 'v0.7.2';
 
 // Embedded screenshot data for tooltips
 const TOOLTIP_IMG_DISTANCE = `${import.meta.env.BASE_URL}tooltips/distance.jpg`;
@@ -567,25 +567,13 @@ function BurnCalculatorInner() {
   // finalPlan is activePlan (drift mode if budget set, otherwise standard)
   const finalPlan = activePlan;
 
-  // Cross-track (VCRS) advisory. Severity = time to null the cross-track velocity
-  // divided by time to reach the target. This folds in closure rate, range, and
-  // thrust (all baked into plan.t_total) — high severity means you cannot null in
-  // time. Advisory at >10% of approach time, hard warning at >50%.
+  // Cross-track (VCRS) advisory — fires whenever VCRS is non-zero.
+  const vcrsNonZero = isFinite(vcrs_mps) && vcrs_mps !== 0;
   const vcrsNullTime =
-    isFinite(vcrs_mps) && vcrs_mps !== 0 && isFinite(a_mps2) && a_mps2 > 0
+    vcrsNonZero && isFinite(a_mps2) && a_mps2 > 0
       ? Math.abs(vcrs_mps) / a_mps2
       : null;
-
-  const vcrsSeverity =
-    vcrsNullTime !== null && !plan.error && !plan.overshoot && plan.t_total > 0
-      ? vcrsNullTime / plan.t_total
-      : 0;
-
-  const vcrsAdvisory = vcrsSeverity > 0.1; // advisory tier (either tier renders)
-  const vcrsCritical = vcrsSeverity > 0.5; // hard-warning tier
-
-  const manualNullBearing =
-    vcrsAdvisory && isFinite(vcrs_mps) ? (vcrs_mps >= 0 ? '90.00°' : '270.00°') : null;
+  const manualNullBearing = vcrsNonZero ? (vcrs_mps >= 0 ? '90.00°' : '270.00°') : null;
 
   // ── Final Approach calculations ──
   const fa_distance_m_raw =
@@ -1388,37 +1376,19 @@ function BurnCalculatorInner() {
                     </div>
                   )}
 
-                  {vcrsAdvisory && !plan.error && !plan.overshoot && (
+                  {vcrsNonZero && (
                     <>
-                      {vcrsCritical ? (
-                        <div className="bc-warning" role="alert">
-                          <AlertTriangle size={14} color="var(--red)" />
-                          <div className="bc-warning-text">
-                            <strong>CANNOT NULL CROSS-TRACK IN TIME</strong>
-                            <br />
-                            Cross-track velocity is {formatVelocity(Math.abs(vcrs_mps))}; nulling it
-                            requires {formatTime(Math.floor(vcrsNullTime))} (
-                            {(vcrsSeverity * 100).toFixed(0)}% of approach time). Reduce closure rate
-                            or abort the approach.
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="bc-advisory">
-                          <strong>CROSS-TRACK VELOCITY</strong> — {formatVelocity(Math.abs(vcrs_mps))}{' '}
-                          of cross-track. Null it before burning: ~
-                          {formatTime(Math.floor(vcrsNullTime))} (
-                          {(vcrsSeverity * 100).toFixed(0)}% of approach). Burning straight toward the
-                          target will not correct it.
-                        </div>
-                      )}
-                      {manualNullBearing && (
-                        <Readout
-                          label="Manual Null Heading"
-                          value={manualNullBearing}
-                          highlight
-                          flickerKey={flickerKey}
-                        />
-                      )}
+                      <div className="bc-advisory">
+                        <strong>CROSS-TRACK VELOCITY</strong> — Null VCRS to ~0 m/s before
+                        starting your approach burn. Burning straight toward the target will not
+                        correct it.
+                      </div>
+                      <Readout
+                        label="Manual Null Heading"
+                        value={manualNullBearing}
+                        highlight
+                        flickerKey={flickerKey}
+                      />
                       {vcrsNullTime !== null && (
                         <>
                           <Readout
@@ -1614,6 +1584,45 @@ function BurnCalculatorInner() {
                       </button>
                     )}
                   </div>
+
+                  {/* ── VCRS advisory ── */}
+                  {vcrsNonZero && (
+                    <>
+                      <div className="bc-advisory">
+                        <strong>CROSS-TRACK VELOCITY</strong> — Null VCRS to ~0 m/s before
+                        starting your approach burn. Burning straight toward the target will not
+                        correct it.
+                      </div>
+                      <Readout
+                        label="Manual Null Heading"
+                        value={manualNullBearing}
+                        highlight
+                        flickerKey={flickerKey}
+                      />
+                      {vcrsNullTime !== null && (
+                        <>
+                          <Readout
+                            label="VCRS Null Until"
+                            value={
+                              vcrsNullTarget
+                                ? formatGameTime(vcrsNullTarget)
+                                : formatTime(Math.floor(vcrsNullTime))
+                            }
+                            highlight
+                            flickerKey={flickerKey}
+                          />
+                          {vcrsNullTarget && (
+                            <div
+                              className="bc-field-note"
+                              style={{ textAlign: 'right', marginBottom: 4 }}
+                            >
+                              DURATION: {formatTime(Math.floor(vcrsNullTime))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </>
+                  )}
 
                   {/* ── FA pre-flight missing field check ── */}
                   {faMissingFields.length > 0 && (
